@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>PVT 反応時間テスト</title>
+<style>
+body {
+    text-align: center;
+    font-family: Arial, sans-serif;
+    margin-top: 100px;
+}
+
+#box {
+    width: 300px;
+    height: 200px;
+    background: gray;
+    margin: auto;
+    line-height: 200px;
+    font-size: 40px;
+    color: white;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+#box.waiting {
+    font-size: 80px;
+}
+
+.instruction {
+    font-size: 40px;
+    font-weight: bold;
+}
+
+#enterStart {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: white;
+    color: #111;
+    font-size: 24px;
+    font-weight: bold;
+    user-select: none;
+}
+
+#preparationMessage {
+    min-height: 36px;
+    margin-top: 18px;
+    font-size: 20px;
+}
+
+#countdown {
+    min-height: 58px;
+    margin-top: 8px;
+    font-size: 48px;
+    font-weight: bold;
+}
+</style>
+</head>
+
+<body>
+
+<div id="enterStart" aria-live="polite">Enterキーを押して待機を開始してください</div>
+
+<p id="taskInstruction" class="instruction" style="visibility:hidden;">赤になったらすぐEnterキー！</p>
+
+<div id="box" class="waiting">✖</div>
+<div id="countdown"></div>
+<div id="preparationMessage"></div>
+
+<script>
+'use strict';
+
+const TEST_DURATION = 270000;       // タスク本体：4分30秒
+const PREPARATION_DURATION = 60000; // 開始前の注視点：60秒
+const COUNTDOWN_DURATION = 5000;    // 開始5秒前からカウントダウン
+
+let startTime;
+let taskStartTime;
+let taskEndTime;
+
+let waiting = false;
+let isRunning = false;
+let isPreparing = false;
+
+let nextStimulusPerfTime;
+let stimulusTimer = null;
+let preparationTimer = null;
+let countdownStartTimer = null;
+let countdownInterval = null;
+let forceEndTimer = null;
+
+let results = [];
+let audioContext = null;
+
+const box = document.getElementById("box");
+const enterStartDiv = document.getElementById("enterStart");
+const taskInstruction = document.getElementById("taskInstruction");
+const countdownDiv = document.getElementById("countdown");
+const preparationMessage = document.getElementById("preparationMessage");
+
+let keyLocked = false;
+
+function formatTime(date) {
+    const h = date.getHours();
+    const m = String(date.getMinutes()).padStart(2, "0");
+    const s = String(date.getSeconds()).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+}
+
+//====================
+// 音声
+//====================
+function getAudioContext() {
+    if (!audioContext) {
+        const AudioContextClass =
+            window.AudioContext || window.webkitAudioContext;
+
+        if (AudioContextClass) {
+            audioContext = new AudioContextClass();
+        }
+    }
+
+    return audioContext;
+}
+
+async function playTone(frequency, durationMs, volume = 0.20) {
+    try {
+        const context = getAudioContext();
+        if (!context) return false;
+
+        if (context.state !== "running") {
+            await context.resume();
+        }
+
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const now = context.currentTime;
+        const duration = durationMs / 1000;
+        const attack = Math.min(0.08, duration * 0.25);
+        const release = Math.min(0.22, duration * 0.45);
+
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, now);
+
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(volume, now + attack);
+        gain.gain.setValueAtTime(
+            volume,
+            now + Math.max(attack, duration - release)
+        );
+        gain.gain.exponentialRampToValueAtTime(
+            0.0001,
+            now + duration
+        );
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(now);
+        oscillator.stop(now + duration);
+
+        return true;
+    } catch (error) {
+        console.error("音声を再生できませんでした。", error);
+        return false;
+    }
+}
+
+function unlockAudio() {
+    try {
+        const context = getAudioContext();
+        if (!context) return;
+
+        if (context.state !== "running") {
+            void context.resume();
+        }
+
+        // ボタン操作中に無音を短く再生し、後続音を許可する。
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        gain.gain.setValueAtTime(0.0001, context.currentTime);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(context.currentTime);
+        oscillator.stop(context.currentTime + 0.02);
+    } catch (error) {
+        console.warn("音声の初期化に失敗しました。", error);
+    }
+}
+
+//====================
+// 60秒の開始前待機
+//====================
+function beginPreparation() {
+    if (isPreparing || isRunning) return;
+
+    results = [];
+    isPreparing = true;
+
+    // Enter操作で音声機能を有効化する。
+    unlockAudio();
+
+    enterStartDiv.style.display = "none";
+    taskInstruction.style.visibility = "hidden";
+
+    box.style.background = "gray";
+    box.classList.add("waiting");
+    box.textContent = "✖";
+
+    countdownDiv.textContent = "";
+    preparationMessage.textContent =
+        "開始まで注視点を見て待機してください";
+
+    // 25秒経過時に、開始5秒前のカウントダウンを開始。
+    countdownStartTimer = setTimeout(
+        startCountdown,
+        PREPARATION_DURATION - COUNTDOWN_DURATION
+    );
+
+    // 30秒経過時にPVT本体を自動開始。
+    preparationTimer = setTimeout(
+        beginTask,
+        PREPARATION_DURATION
+    );
+}
+
+// 待機開始用のEnter。タスク開始後の反応処理とは分離する。
+document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.repeat) return;
+    if (isPreparing || isRunning) return;
+
+    event.preventDefault();
+    beginPreparation();
+});
+
+function startCountdown() {
+    if (!isPreparing) return;
+
+    // 開始5秒前の音。
+    void playTone(659.25, 500, 0.20);
+
+    preparationMessage.textContent = "";
+
+    let remaining = 5;
+    countdownDiv.textContent = remaining;
+
+    countdownInterval = setInterval(() => {
+        remaining--;
+        countdownDiv.textContent = remaining > 0 ? remaining : "";
+
+        if (remaining <= 0) {
+            clearInterval(countdownInterval);
+        }
+    }, 1000);
+}
+
+//====================
+// PVT本体開始
+//====================
+function beginTask() {
+    if (!isPreparing) return;
+
+    isPreparing = false;
+    isRunning = true;
+
+    clearInterval(countdownInterval);
+    countdownDiv.textContent = "";
+    preparationMessage.textContent = "";
+    taskInstruction.style.visibility = "visible";
+
+    // タスク開始時の音。5秒前より高い音にして区別する。
+    void playTone(880, 600, 0.22);
+
+    // 4分30秒の計測は、この時点から開始する。
+    taskStartTime = new Date();
+
+    forceEndTimer = setTimeout(() => {
+        if (isRunning) {
+            endTest();
+        }
+    }, TEST_DURATION);
+
+    startTest();
+}
+
+//====================
+// 試行開始
+//====================
+function startTest() {
+    if (!isRunning) return;
+
+    box.style.background = "gray";
+    box.classList.add("waiting");
+    box.textContent = "✖";
+
+    waiting = true;
+
+    // 2,000 ms以上、10,000 ms未満のランダム待機。
+    const delay = Math.random() * 8000 + 2000;
+
+    nextStimulusPerfTime = performance.now() + delay;
+
+    stimulusTimer = setTimeout(() => {
+        if (!isRunning) return;
+
+        requestAnimationFrame(() => {
+            if (!isRunning) return;
+
+            box.style.background = "red";
+            box.classList.remove("waiting");
+            box.textContent = "Enter!";
+
+            startTime = performance.now();
+            waiting = false;
+        });
+    }, delay);
+}
+
+//====================
+// Enterキー処理
+//====================
+document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    if (keyLocked) return;
+
+    keyLocked = true;
+    handleResponse();
+});
+
+document.addEventListener("keyup", (event) => {
+    if (event.key === "Enter") {
+        keyLocked = false;
+    }
+});
+
+//====================
+// 反応処理
+//====================
+function handleResponse() {
+    if (!isRunning) return;
+
+    // 赤刺激提示前の先行反応。
+    if (waiting) {
+        const remaining = Math.round(
+            nextStimulusPerfTime - performance.now()
+        );
+
+        results.push({
+            trial: "",
+            RT: -remaining
+        });
+
+        return;
+    }
+
+    // 赤刺激提示後の正常反応。
+    const endTime = performance.now();
+    const rt = Math.round(endTime - startTime);
+
+    const trialNumber =
+        results.filter(row => row.trial !== "").length + 1;
+
+    results.push({
+        trial: trialNumber,
+        RT: rt
+    });
+
+    startTest();
+}
+
+//====================
+// テスト終了
+//====================
+function endTest() {
+    if (!isRunning) return;
+
+    isRunning = false;
+    waiting = false;
+    taskEndTime = new Date();
+
+    clearTimeout(stimulusTimer);
+    clearTimeout(forceEndTimer);
+
+    box.style.background = "black";
+    box.classList.remove("waiting");
+    box.textContent = "終了";
+
+    countdownDiv.textContent = "";
+    preparationMessage.textContent = "";
+
+    downloadCSV();
+}
+
+//====================
+// CSV出力
+//====================
+function downloadCSV() {
+    const now = new Date();
+
+    const fileName =
+        now.getFullYear() +
+        String(now.getMonth() + 1).padStart(2, "0") +
+        String(now.getDate()).padStart(2, "0") +
+        "_" +
+        String(now.getHours()).padStart(2, "0") +
+        String(now.getMinutes()).padStart(2, "0");
+
+    let csv = "trial,RT,time\n";
+
+    results.forEach((row, index) => {
+        let timeCol = "";
+
+        if (index === 0) {
+            timeCol = formatTime(taskStartTime);
+        }
+
+        if (index === 1) {
+            timeCol = formatTime(taskEndTime);
+        }
+
+        csv +=
+            row.trial + "," +
+            row.RT + "," +
+            timeCol + "\n";
+    });
+
+    // データが0件または1件しかない場合の保険。
+    if (results.length === 0) {
+        csv += ",," + formatTime(taskStartTime) + "\n";
+        csv += ",," + formatTime(taskEndTime) + "\n";
+    } else if (results.length === 1) {
+        csv += ",," + formatTime(taskEndTime) + "\n";
+    }
+
+    // Excelでの文字化けを防ぐUTF-8 BOM。
+    const blob = new Blob(
+        ["\uFEFF" + csv],
+        { type: "text/csv;charset=utf-8;" }
+    );
+
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+
+    link.href = url;
+    link.download = "pvt_" + fileName + ".csv";
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+</script>
+
+</body>
+</html>
