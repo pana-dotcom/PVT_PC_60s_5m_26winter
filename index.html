@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PVT 反応時間テスト</title>
+
 <style>
 body {
     text-align: center;
@@ -63,9 +64,17 @@ body {
 
 <body>
 
-<div id="enterStart" aria-live="polite">Enterキーを押して待機を開始してください</div>
+<div id="enterStart" aria-live="polite">
+    Enterキーを押して待機を開始してください
+</div>
 
-<p id="taskInstruction" class="instruction" style="visibility:hidden;">赤になったらすぐEnterキー！</p>
+<p
+    id="taskInstruction"
+    class="instruction"
+    style="visibility:hidden;"
+>
+    赤になったらすぐEnterキー！
+</p>
 
 <div id="box" class="waiting">✖</div>
 <div id="countdown"></div>
@@ -74,9 +83,36 @@ body {
 <script>
 'use strict';
 
-const TEST_DURATION = 270000;       // タスク本体：4分30秒
+/* ==================================================
+   実験設定
+================================================== */
+
+const TEST_DURATION = 270000;       // PVT本体：4分30秒
 const PREPARATION_DURATION = 60000; // 開始前の注視点：60秒
 const COUNTDOWN_DURATION = 5000;    // 開始5秒前からカウントダウン
+
+/*
+最初のEnterキー押下時と
+PVT開始5秒前に鳴らす警告音
+*/
+const WARNING_TONE = {
+    frequency: 659.25,
+    duration: 500,
+    volume: 0.20
+};
+
+/*
+PVT開始時と終了時に鳴らす音
+*/
+const EVENT_TONE = {
+    frequency: 880,
+    duration: 600,
+    volume: 0.22
+};
+
+/* ==================================================
+   状態変数
+================================================== */
 
 let startTime;
 let taskStartTime;
@@ -85,8 +121,10 @@ let taskEndTime;
 let waiting = false;
 let isRunning = false;
 let isPreparing = false;
+let preparationStarted = false;
 
 let nextStimulusPerfTime;
+
 let stimulusTimer = null;
 let preparationTimer = null;
 let countdownStartTimer = null;
@@ -95,258 +133,598 @@ let forceEndTimer = null;
 
 let results = [];
 let audioContext = null;
-
-const box = document.getElementById("box");
-const enterStartDiv = document.getElementById("enterStart");
-const taskInstruction = document.getElementById("taskInstruction");
-const countdownDiv = document.getElementById("countdown");
-const preparationMessage = document.getElementById("preparationMessage");
-
 let keyLocked = false;
 
+/* ==================================================
+   DOM
+================================================== */
+
+const box =
+    document.getElementById("box");
+
+const enterStartDiv =
+    document.getElementById("enterStart");
+
+const taskInstruction =
+    document.getElementById("taskInstruction");
+
+const countdownDiv =
+    document.getElementById("countdown");
+
+const preparationMessage =
+    document.getElementById("preparationMessage");
+
+/* ==================================================
+   時刻
+================================================== */
+
 function formatTime(date) {
-    const h = date.getHours();
-    const m = String(date.getMinutes()).padStart(2, "0");
-    const s = String(date.getSeconds()).padStart(2, "0");
+    const h =
+        date.getHours();
+
+    const m =
+        String(
+            date.getMinutes()
+        ).padStart(2, "0");
+
+    const s =
+        String(
+            date.getSeconds()
+        ).padStart(2, "0");
+
     return `${h}:${m}:${s}`;
 }
 
-//====================
-// 音声
-//====================
+/* ==================================================
+   音声
+================================================== */
+
 function getAudioContext() {
     if (!audioContext) {
         const AudioContextClass =
-            window.AudioContext || window.webkitAudioContext;
+            window.AudioContext ||
+            window.webkitAudioContext;
 
         if (AudioContextClass) {
-            audioContext = new AudioContextClass();
+            audioContext =
+                new AudioContextClass();
         }
     }
 
     return audioContext;
 }
 
-async function playTone(frequency, durationMs, volume = 0.20) {
-    try {
-        const context = getAudioContext();
-        if (!context) return false;
+/*
+最初のEnterキー操作で、
+ブラウザの音声再生制限を解除します。
+*/
+async function unlockAudio() {
+    const context =
+        getAudioContext();
 
-        if (context.state !== "running") {
+    if (!context) {
+        throw new Error(
+            "音声機能を利用できません。"
+        );
+    }
+
+    if (
+        context.state !==
+        "running"
+    ) {
+        await context.resume();
+    }
+
+    /*
+    ほぼ無音の短い音を再生します。
+    */
+    const oscillator =
+        context.createOscillator();
+
+    const gain =
+        context.createGain();
+
+    gain.gain.setValueAtTime(
+        0.0001,
+        context.currentTime
+    );
+
+    oscillator.connect(gain);
+
+    gain.connect(
+        context.destination
+    );
+
+    oscillator.start(
+        context.currentTime
+    );
+
+    oscillator.stop(
+        context.currentTime +
+        0.02
+    );
+}
+
+async function playTone(
+    frequency,
+    durationMs,
+    volume = 0.20
+) {
+    try {
+        const context =
+            getAudioContext();
+
+        if (!context) {
+            return false;
+        }
+
+        if (
+            context.state !==
+            "running"
+        ) {
             await context.resume();
         }
 
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        const now = context.currentTime;
-        const duration = durationMs / 1000;
-        const attack = Math.min(0.08, duration * 0.25);
-        const release = Math.min(0.22, duration * 0.45);
+        const oscillator =
+            context.createOscillator();
 
-        oscillator.type = "sine";
-        oscillator.frequency.setValueAtTime(frequency, now);
+        const gain =
+            context.createGain();
 
-        gain.gain.setValueAtTime(0.0001, now);
-        gain.gain.exponentialRampToValueAtTime(volume, now + attack);
+        const now =
+            context.currentTime;
+
+        const duration =
+            durationMs / 1000;
+
+        const attack =
+            Math.min(
+                0.08,
+                duration * 0.25
+            );
+
+        const release =
+            Math.min(
+                0.22,
+                duration * 0.45
+            );
+
+        oscillator.type =
+            "sine";
+
+        oscillator.frequency.setValueAtTime(
+            frequency,
+            now
+        );
+
+        gain.gain.setValueAtTime(
+            0.0001,
+            now
+        );
+
+        gain.gain.exponentialRampToValueAtTime(
+            volume,
+            now + attack
+        );
+
         gain.gain.setValueAtTime(
             volume,
-            now + Math.max(attack, duration - release)
+            now + Math.max(
+                attack,
+                duration - release
+            )
         );
+
         gain.gain.exponentialRampToValueAtTime(
             0.0001,
             now + duration
         );
 
         oscillator.connect(gain);
-        gain.connect(context.destination);
+
+        gain.connect(
+            context.destination
+        );
+
         oscillator.start(now);
-        oscillator.stop(now + duration);
+
+        oscillator.stop(
+            now + duration
+        );
 
         return true;
+
     } catch (error) {
-        console.error("音声を再生できませんでした。", error);
+        console.error(
+            "音声を再生できませんでした。",
+            error
+        );
+
         return false;
     }
 }
 
-function unlockAudio() {
-    try {
-        const context = getAudioContext();
-        if (!context) return;
-
-        if (context.state !== "running") {
-            void context.resume();
-        }
-
-        // ボタン操作中に無音を短く再生し、後続音を許可する。
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        gain.gain.setValueAtTime(0.0001, context.currentTime);
-        oscillator.connect(gain);
-        gain.connect(context.destination);
-        oscillator.start(context.currentTime);
-        oscillator.stop(context.currentTime + 0.02);
-    } catch (error) {
-        console.warn("音声の初期化に失敗しました。", error);
-    }
+/*
+最初のEnterキー押下時と、
+開始5秒前に使用する音です。
+*/
+function playWarningTone() {
+    void playTone(
+        WARNING_TONE.frequency,
+        WARNING_TONE.duration,
+        WARNING_TONE.volume
+    );
 }
 
-//====================
-// 60秒の開始前待機
-//====================
-function beginPreparation() {
-    if (isPreparing || isRunning) return;
+/*
+PVT開始時と終了時に使用する音です。
+*/
+function playEventTone() {
+    void playTone(
+        EVENT_TONE.frequency,
+        EVENT_TONE.duration,
+        EVENT_TONE.volume
+    );
+}
 
-    results = [];
+/* ==================================================
+   60秒間の開始前待機
+================================================== */
+
+async function beginPreparation() {
+    if (
+        preparationStarted ||
+        isPreparing ||
+        isRunning
+    ) {
+        return;
+    }
+
+    preparationStarted = true;
     isPreparing = true;
 
-    // Enter操作で音声機能を有効化する。
-    unlockAudio();
+    results = [];
 
-    enterStartDiv.style.display = "none";
-    taskInstruction.style.visibility = "hidden";
+    /*
+    最初のEnterキー操作の中で、
+    音声機能を有効化します。
+    */
+    try {
+        await unlockAudio();
 
-    box.style.background = "gray";
-    box.classList.add("waiting");
-    box.textContent = "✖";
+    } catch (error) {
+        console.error(
+            "音声の初期化に失敗しました。",
+            error
+        );
 
-    countdownDiv.textContent = "";
+        preparationStarted = false;
+        isPreparing = false;
+
+        enterStartDiv.textContent =
+            "音声を有効にできませんでした。ページを再読み込みしてください。";
+
+        return;
+    }
+
+    enterStartDiv.style.display =
+        "none";
+
+    taskInstruction.style.visibility =
+        "hidden";
+
+    box.style.background =
+        "gray";
+
+    box.classList.add(
+        "waiting"
+    );
+
+    box.textContent =
+        "✖";
+
+    countdownDiv.textContent =
+        "";
+
     preparationMessage.textContent =
         "開始まで注視点を見て待機してください";
 
-    // 25秒経過時に、開始5秒前のカウントダウンを開始。
-    countdownStartTimer = setTimeout(
-        startCountdown,
-        PREPARATION_DURATION - COUNTDOWN_DURATION
-    );
+    /*
+    最初のEnterキー押下時に、
+    開始5秒前と同じ警告音を鳴らします。
+    */
+    playWarningTone();
 
-    // 30秒経過時にPVT本体を自動開始。
-    preparationTimer = setTimeout(
-        beginTask,
-        PREPARATION_DURATION
-    );
+    /*
+    55秒後、開始5秒前に
+    カウントダウンを開始します。
+    */
+    countdownStartTimer =
+        setTimeout(
+            startCountdown,
+            PREPARATION_DURATION -
+            COUNTDOWN_DURATION
+        );
+
+    /*
+    60秒後にPVTを自動開始します。
+    */
+    preparationTimer =
+        setTimeout(
+            beginTask,
+            PREPARATION_DURATION
+        );
 }
 
-// 待機開始用のEnter。タスク開始後の反応処理とは分離する。
-document.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.repeat) return;
-    if (isPreparing || isRunning) return;
+/*
+待機開始用のEnterキーです。
+PVT開始後の反応用Enterとは分離しています。
+*/
+document.addEventListener(
+    "keydown",
+    event => {
+        if (
+            event.key !== "Enter" ||
+            event.repeat
+        ) {
+            return;
+        }
 
-    event.preventDefault();
-    beginPreparation();
-});
+        if (
+            preparationStarted ||
+            isPreparing ||
+            isRunning
+        ) {
+            return;
+        }
+
+        event.preventDefault();
+
+        void beginPreparation();
+    }
+);
+
+/* ==================================================
+   開始5秒前のカウントダウン
+================================================== */
 
 function startCountdown() {
-    if (!isPreparing) return;
+    if (!isPreparing) {
+        return;
+    }
 
-    // 開始5秒前の音。
-    void playTone(659.25, 500, 0.20);
+    /*
+    最初のEnterキー押下時と
+    同じ警告音を鳴らします。
+    */
+    playWarningTone();
 
-    preparationMessage.textContent = "";
+    preparationMessage.textContent =
+        "";
 
     let remaining = 5;
-    countdownDiv.textContent = remaining;
 
-    countdownInterval = setInterval(() => {
-        remaining--;
-        countdownDiv.textContent = remaining > 0 ? remaining : "";
+    countdownDiv.textContent =
+        remaining;
 
-        if (remaining <= 0) {
-            clearInterval(countdownInterval);
-        }
-    }, 1000);
+    countdownInterval =
+        setInterval(
+            () => {
+                remaining--;
+
+                countdownDiv.textContent =
+                    remaining > 0
+                        ? remaining
+                        : "";
+
+                if (
+                    remaining <= 0
+                ) {
+                    clearInterval(
+                        countdownInterval
+                    );
+
+                    countdownInterval =
+                        null;
+                }
+            },
+            1000
+        );
 }
 
-//====================
-// PVT本体開始
-//====================
+/* ==================================================
+   PVT本体開始
+================================================== */
+
 function beginTask() {
-    if (!isPreparing) return;
+    if (!isPreparing) {
+        return;
+    }
 
     isPreparing = false;
     isRunning = true;
 
-    clearInterval(countdownInterval);
-    countdownDiv.textContent = "";
-    preparationMessage.textContent = "";
-    taskInstruction.style.visibility = "visible";
+    clearInterval(
+        countdownInterval
+    );
 
-    // タスク開始時の音。5秒前より高い音にして区別する。
-    void playTone(880, 600, 0.22);
+    countdownInterval =
+        null;
 
-    // 4分30秒の計測は、この時点から開始する。
-    taskStartTime = new Date();
+    countdownDiv.textContent =
+        "";
 
-    forceEndTimer = setTimeout(() => {
-        if (isRunning) {
-            endTest();
-        }
-    }, TEST_DURATION);
+    preparationMessage.textContent =
+        "";
+
+    taskInstruction.style.visibility =
+        "visible";
+
+    /*
+    PVT開始時の音を鳴らします。
+    */
+    playEventTone();
+
+    /*
+    4分30秒の計測はここから開始します。
+    */
+    taskStartTime =
+        new Date();
+
+    forceEndTimer =
+        setTimeout(
+            () => {
+                if (isRunning) {
+                    endTest();
+                }
+            },
+            TEST_DURATION
+        );
 
     startTest();
 }
 
-//====================
-// 試行開始
-//====================
-function startTest() {
-    if (!isRunning) return;
+/* ==================================================
+   試行開始
+================================================== */
 
-    box.style.background = "gray";
-    box.classList.add("waiting");
-    box.textContent = "✖";
+function startTest() {
+    if (!isRunning) {
+        return;
+    }
+
+    /*
+    直前の刺激タイマーを解除します。
+    */
+    clearTimeout(
+        stimulusTimer
+    );
+
+    box.style.background =
+        "gray";
+
+    box.classList.add(
+        "waiting"
+    );
+
+    box.textContent =
+        "✖";
 
     waiting = true;
 
-    // 2,000 ms以上、10,000 ms未満のランダム待機。
-    const delay = Math.random() * 8000 + 2000;
+    /*
+    現在は赤刺激が表示されていないため、
+    前回の赤刺激開始時刻を消去します。
+    */
+    startTime =
+        undefined;
 
-    nextStimulusPerfTime = performance.now() + delay;
+    /*
+    2,000 ms以上、10,000 ms未満の
+    ランダム待機です。
+    */
+    const delay =
+        Math.random() *
+        8000 +
+        2000;
 
-    stimulusTimer = setTimeout(() => {
-        if (!isRunning) return;
+    nextStimulusPerfTime =
+        performance.now() +
+        delay;
 
-        requestAnimationFrame(() => {
-            if (!isRunning) return;
+    stimulusTimer =
+        setTimeout(
+            () => {
+                if (!isRunning) {
+                    return;
+                }
 
-            box.style.background = "red";
-            box.classList.remove("waiting");
-            box.textContent = "Enter!";
+                requestAnimationFrame(
+                    () => {
+                        if (
+                            !isRunning
+                        ) {
+                            return;
+                        }
 
-            startTime = performance.now();
-            waiting = false;
-        });
-    }, delay);
+                        box.style.background =
+                            "red";
+
+                        box.classList.remove(
+                            "waiting"
+                        );
+
+                        box.textContent =
+                            "Enter!";
+
+                        startTime =
+                            performance.now();
+
+                        waiting =
+                            false;
+                    }
+                );
+            },
+            delay
+        );
 }
 
-//====================
-// Enterキー処理
-//====================
-document.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    if (keyLocked) return;
+/* ==================================================
+   Enterキー処理
+================================================== */
 
-    keyLocked = true;
-    handleResponse();
-});
+document.addEventListener(
+    "keydown",
+    event => {
+        if (
+            event.key !== "Enter" ||
+            event.repeat
+        ) {
+            return;
+        }
 
-document.addEventListener("keyup", (event) => {
-    if (event.key === "Enter") {
-        keyLocked = false;
+        if (keyLocked) {
+            return;
+        }
+
+        keyLocked = true;
+
+        handleResponse();
     }
-});
+);
 
-//====================
-// 反応処理
-//====================
+document.addEventListener(
+    "keyup",
+    event => {
+        if (
+            event.key === "Enter"
+        ) {
+            keyLocked = false;
+        }
+    }
+);
+
+/* ==================================================
+   反応処理
+================================================== */
+
 function handleResponse() {
-    if (!isRunning) return;
+    if (!isRunning) {
+        return;
+    }
 
-    // 赤刺激提示前の先行反応。
+    /*
+    赤刺激提示前の先行反応です。
+    */
     if (waiting) {
-        const remaining = Math.round(
-            nextStimulusPerfTime - performance.now()
-        );
+        const remaining =
+            Math.max(
+                0,
+                Math.round(
+                    nextStimulusPerfTime -
+                    performance.now()
+                )
+            );
 
         results.push({
             trial: "",
@@ -356,103 +734,274 @@ function handleResponse() {
         return;
     }
 
-    // 赤刺激提示後の正常反応。
-    const endTime = performance.now();
-    const rt = Math.round(endTime - startTime);
+    /*
+    赤刺激の表示開始時刻がない場合は
+    記録しません。
+    */
+    if (
+        startTime ===
+        undefined
+    ) {
+        return;
+    }
+
+    /*
+    赤刺激提示後の正常反応です。
+    */
+    const endTime =
+        performance.now();
+
+    const rt =
+        Math.round(
+            endTime -
+            startTime
+        );
 
     const trialNumber =
-        results.filter(row => row.trial !== "").length + 1;
+        results.filter(
+            row =>
+                row.trial !== ""
+        ).length + 1;
 
     results.push({
-        trial: trialNumber,
-        RT: rt
+        trial:
+            trialNumber,
+        RT:
+            rt
     });
 
     startTest();
 }
 
-//====================
-// テスト終了
-//====================
+/* ==================================================
+   テスト終了
+================================================== */
+
 function endTest() {
-    if (!isRunning) return;
+    if (!isRunning) {
+        return;
+    }
 
     isRunning = false;
     waiting = false;
-    taskEndTime = new Date();
 
-    clearTimeout(stimulusTimer);
-    clearTimeout(forceEndTimer);
+    taskEndTime =
+        new Date();
 
-    box.style.background = "black";
-    box.classList.remove("waiting");
-    box.textContent = "終了";
+    clearTimeout(
+        stimulusTimer
+    );
 
-    countdownDiv.textContent = "";
-    preparationMessage.textContent = "";
+    clearTimeout(
+        forceEndTimer
+    );
 
+    clearTimeout(
+        preparationTimer
+    );
+
+    clearTimeout(
+        countdownStartTimer
+    );
+
+    if (
+        countdownInterval !==
+        null
+    ) {
+        clearInterval(
+            countdownInterval
+        );
+
+        countdownInterval =
+            null;
+    }
+
+    /*
+    PVT終了時に、
+    PVT開始時と同じ音を鳴らします。
+    */
+    playEventTone();
+
+    /*
+    終了時に赤刺激が表示途中だった場合は、
+    未完了試行としてresultsへ追加しません。
+    */
+    startTime =
+        undefined;
+
+    box.style.background =
+        "black";
+
+    box.classList.remove(
+        "waiting"
+    );
+
+    box.textContent =
+        "終了";
+
+    countdownDiv.textContent =
+        "";
+
+    preparationMessage.textContent =
+        "";
+
+    taskInstruction.style.visibility =
+        "hidden";
+
+    /*
+    終了までに記録済みの結果だけを
+    CSVへ出力します。
+    */
     downloadCSV();
 }
 
-//====================
-// CSV出力
-//====================
+/* ==================================================
+   CSV出力
+================================================== */
+
 function downloadCSV() {
-    const now = new Date();
+    const now =
+        new Date();
 
     const fileName =
         now.getFullYear() +
-        String(now.getMonth() + 1).padStart(2, "0") +
-        String(now.getDate()).padStart(2, "0") +
+        String(
+            now.getMonth() + 1
+        ).padStart(2, "0") +
+        String(
+            now.getDate()
+        ).padStart(2, "0") +
         "_" +
-        String(now.getHours()).padStart(2, "0") +
-        String(now.getMinutes()).padStart(2, "0")+
-        String(now.getSeconds()).padStart(2, "0");
+        String(
+            now.getHours()
+        ).padStart(2, "0") +
+        String(
+            now.getMinutes()
+        ).padStart(2, "0") +
+        String(
+            now.getSeconds()
+        ).padStart(2, "0");
 
-    let csv = "trial,RT,time\n";
+    let csv =
+        "trial,RT,time\n";
 
-    results.forEach((row, index) => {
-        let timeCol = "";
+    results.forEach(
+        (row, index) => {
+            let timeCol =
+                "";
 
-        if (index === 0) {
-            timeCol = formatTime(taskStartTime);
+            if (
+                index === 0
+            ) {
+                timeCol =
+                    formatTime(
+                        taskStartTime
+                    );
+            }
+
+            if (
+                index === 1
+            ) {
+                timeCol =
+                    formatTime(
+                        taskEndTime
+                    );
+            }
+
+            csv +=
+                row.trial +
+                "," +
+                row.RT +
+                "," +
+                timeCol +
+                "\n";
         }
-
-        if (index === 1) {
-            timeCol = formatTime(taskEndTime);
-        }
-
-        csv +=
-            row.trial + "," +
-            row.RT + "," +
-            timeCol + "\n";
-    });
-
-    // データが0件または1件しかない場合の保険。
-    if (results.length === 0) {
-        csv += ",," + formatTime(taskStartTime) + "\n";
-        csv += ",," + formatTime(taskEndTime) + "\n";
-    } else if (results.length === 1) {
-        csv += ",," + formatTime(taskEndTime) + "\n";
-    }
-
-    // Excelでの文字化けを防ぐUTF-8 BOM。
-    const blob = new Blob(
-        ["\uFEFF" + csv],
-        { type: "text/csv;charset=utf-8;" }
     );
 
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
+    /*
+    データが0件または1件の場合でも、
+    開始時刻と終了時刻を出力します。
+    */
+    if (
+        results.length === 0
+    ) {
+        csv +=
+            ",," +
+            formatTime(
+                taskStartTime
+            ) +
+            "\n";
 
-    link.href = url;
-    link.download = "pvt_" + fileName + ".csv";
+        csv +=
+            ",," +
+            formatTime(
+                taskEndTime
+            ) +
+            "\n";
 
-    document.body.appendChild(link);
+    } else if (
+        results.length === 1
+    ) {
+        csv +=
+            ",," +
+            formatTime(
+                taskEndTime
+            ) +
+            "\n";
+    }
+
+    /*
+    Excelでの文字化けを防ぐため、
+    UTF-8 BOMを付けます。
+    */
+    const blob =
+        new Blob(
+            [
+                "\uFEFF" +
+                csv
+            ],
+            {
+                type:
+                    "text/csv;charset=utf-8;"
+            }
+        );
+
+    const link =
+        document.createElement(
+            "a"
+        );
+
+    const url =
+        URL.createObjectURL(
+            blob
+        );
+
+    link.href =
+        url;
+
+    link.download =
+        "pvt_" +
+        fileName +
+        ".csv";
+
+    document.body.appendChild(
+        link
+    );
+
     link.click();
-    document.body.removeChild(link);
 
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    document.body.removeChild(
+        link
+    );
+
+    setTimeout(
+        () => {
+            URL.revokeObjectURL(
+                url
+            );
+        },
+        1000
+    );
 }
 </script>
 
